@@ -1,0 +1,25 @@
+CERA 160 Compensation for damages
+CERA 181 Purchase/Sell/Name Change of Pipeline Facilities
+CERA 183 Pipeline Facilities Certificate
+CERA 190 Vary or transfer pipeline facilities certificate
+CERA 201 Detailed Route
+CERA 211 Route Deviations
+CERA 213 Leave to open pipeline
+CERA 214 Pipeline Facilities Order
+CERA 239 Transmission Order
+CERA 241 Abandonment of Pipeline Facilities
+CERA 248 International Power Line
+CERA 277 Abandonment of international power line
+CERA 280 Vary or transfer international power line certificate
+CERA 288 Vary or transfer international power line permit
+CERA 298 Offshore power line or offshore renewable energy project authorization
+CERA 300 Vary or transfer offshore power line or offshore renewable energy project authorization
+CERA 324 Right of Entry
+CERA 327 Compensation of lands
+CERA 344 Long Term Gas Export
+CERA 344 Long Term Oil Export
+CERA 344 Short-term Export
+CERA 348 Vary export licence
+CERA 349 Transfer export licence
+CERA 356 Electricity Export
+

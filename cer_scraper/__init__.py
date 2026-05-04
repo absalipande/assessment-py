@@ -1,0 +1,2 @@
+"""CER REGDOCS monthly scraper."""
+
