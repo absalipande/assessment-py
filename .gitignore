@@ -5,5 +5,5 @@ __pycache__/
 *.pyc
 data/downloads/
 data/manifests/
+credentials/
 playwright-report/
-

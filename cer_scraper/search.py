@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import AsyncIterator, List
+import asyncio
+import time
+from typing import AsyncIterator, Dict, List, Optional
 from urllib.parse import urlencode, urljoin
 
 import httpx
@@ -12,25 +14,45 @@ from cer_scraper.retry import with_retries
 
 
 class RegdocsSearcher:
-    def __init__(self, base_url: str, headless: bool, timeout_ms: int) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        headless: bool,
+        timeout_ms: int,
+        http_timeout_seconds: Optional[float] = None,
+        application_type_values: Optional[Dict[str, str]] = None,
+    ) -> None:
         self.base_url = base_url
         self.headless = headless
         self.timeout_ms = timeout_ms
+        self.http_timeout_seconds = http_timeout_seconds or min(timeout_ms / 1000, 30.0)
+        self.application_type_values = application_type_values or {}
 
     async def discover(self, jobs: List[SearchJob]) -> AsyncIterator[DocumentRecord]:
         async for record in self._discover_with_http(jobs):
             yield record
 
     async def _discover_with_http(self, jobs: List[SearchJob]) -> AsyncIterator[DocumentRecord]:
+        yielded_urls = set()
         async with httpx.AsyncClient(
             follow_redirects=True,
-            timeout=httpx.Timeout(self.timeout_ms / 1000),
+            timeout=httpx.Timeout(self.http_timeout_seconds),
             headers={"User-Agent": "cer-regdocs-monthly-review/0.1"},
         ) as client:
-            advanced_html = await self._fetch_text(client, self.base_url)
-            application_type_values = self._parse_application_type_values(advanced_html)
+            application_type_values = self.application_type_values
+            if application_type_values:
+                print("Using cached REGDOCS application-type filter IDs", flush=True)
+            else:
+                print(f"Loading REGDOCS filter metadata: {self.base_url}", flush=True)
+                advanced_html = await self._fetch_text(client, self.base_url)
+                application_type_values = self._parse_application_type_values(advanced_html)
 
-            for job in jobs:
+            for index, job in enumerate(jobs, start=1):
+                print(
+                    f"[{index}/{len(jobs)}] Searching {job.application_type} "
+                    f"({job.from_date} to {job.to_date})",
+                    flush=True,
+                )
                 filter_value = application_type_values.get(job.application_type)
                 if not filter_value:
                     raise ValueError(f"Application type not found on REGDOCS page: {job.application_type}")
@@ -41,11 +63,33 @@ class RegdocsSearcher:
                     f"/REGDOCS/Search/SearchAdvancedResults?{urlencode(params)}",
                 )
 
+                visited_urls = set()
+                page_number = 1
                 while result_url:
-                    html = await self._fetch_text(client, result_url)
-                    for record in self._parse_result_page(html, result_url, job):
+                    if result_url in visited_urls:
+                        print(f"  stopping pagination loop at {result_url}", flush=True)
+                        break
+                    visited_urls.add(result_url)
+                    print(f"  fetching results page {page_number}: {result_url}", flush=True)
+                    started = time.monotonic()
+                    try:
+                        html = await self._fetch_text(client, result_url)
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"  failed: {result_url} ({exc})", flush=True)
+                        break
+                    records = self._parse_result_page(html, result_url, job)
+                    elapsed = time.monotonic() - started
+                    if not records:
+                        print(f"  no records ({elapsed:.1f}s)", flush=True)
+                    else:
+                        print(f"  records: {len(records)} ({elapsed:.1f}s)", flush=True)
+                    for record in records:
+                        if record.document_url in yielded_urls:
+                            continue
+                        yielded_urls.add(record.document_url)
                         yield record
                     result_url = self._next_results_page(html, result_url)
+                    page_number += 1
 
     async def _fetch_text(self, client: httpx.AsyncClient, url: str) -> str:
         async def fetch() -> str:
@@ -53,7 +97,10 @@ class RegdocsSearcher:
             response.raise_for_status()
             return response.text
 
-        return await with_retries(fetch)
+        async def bounded_fetch() -> str:
+            return await asyncio.wait_for(fetch(), timeout=self.http_timeout_seconds)
+
+        return await with_retries(bounded_fetch, attempts=2, base_delay_seconds=3.0)
 
     def _parse_application_type_values(self, html: str) -> dict:
         soup = BeautifulSoup(html, "html.parser")

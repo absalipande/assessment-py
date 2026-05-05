@@ -6,7 +6,7 @@ import time
 
 import httpx
 
-from cer_scraper.config import load_application_types, load_settings
+from cer_scraper.config import load_application_type_ids, load_application_types, load_settings
 from cer_scraper.downloader import DocumentDownloader
 from cer_scraper.drive import DriveUploader
 from cer_scraper.manifest import Manifest
@@ -22,6 +22,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--from-date", required=True, help="Start date, e.g. 2026-02-01")
     run.add_argument("--to-date", required=True, help="End date, e.g. 2026-03-01")
     run.add_argument("--limit-types", type=int, default=None, help="Limit application types for testing")
+    run.add_argument(
+        "--http-timeout",
+        type=float,
+        default=None,
+        help="Per-request REGDOCS discovery timeout in seconds",
+    )
     run.add_argument("--dry-run", action="store_true", help="Discover records but do not download/upload")
 
     probe = subparsers.add_parser("probe", help="Check whether the REGDOCS Advanced Search URL responds")
@@ -48,6 +54,7 @@ async def probe(args: argparse.Namespace) -> None:
 async def run(args: argparse.Namespace) -> None:
     settings = load_settings()
     application_types = load_application_types(settings.application_types_path)
+    application_type_ids = load_application_type_ids(settings.application_type_ids_path)
     if args.limit_types:
         application_types = application_types[: args.limit_types]
 
@@ -62,9 +69,15 @@ async def run(args: argparse.Namespace) -> None:
 
     manifest = Manifest(settings.manifest_path)
     seen = manifest.seen_document_urls()
-    searcher = RegdocsSearcher(settings.base_url, settings.headless, settings.timeout_ms)
+    searcher = RegdocsSearcher(
+        settings.base_url,
+        settings.headless,
+        settings.timeout_ms,
+        http_timeout_seconds=args.http_timeout,
+        application_type_values=application_type_ids,
+    )
     downloader = DocumentDownloader(settings.output_dir, settings.timeout_ms / 1000)
-    uploader = DriveUploader(settings.drive_folder_id)
+    uploader = DriveUploader(settings.drive_folder_id, settings.google_credentials_path)
     discovered_count = 0
     skipped_count = 0
 
