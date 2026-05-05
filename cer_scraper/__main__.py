@@ -100,7 +100,10 @@ async def run(args: argparse.Namespace) -> None:
 
         manifest.append(record)
         seen.add(record.document_url)
-        print(f"{record.status}: {record.document_url}")
+        if record.status == "failed":
+            print(f"failed: {record.document_url} -> {record.error}", flush=True)
+        else:
+            print(f"{record.status}: {record.document_url}", flush=True)
 
     if discovered_count == 0:
         print("No document records discovered for this date range/application type selection.")

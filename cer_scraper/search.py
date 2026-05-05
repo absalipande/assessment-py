@@ -37,7 +37,15 @@ class RegdocsSearcher:
         async with httpx.AsyncClient(
             follow_redirects=True,
             timeout=httpx.Timeout(self.http_timeout_seconds),
-            headers={"User-Agent": "cer-regdocs-monthly-review/0.1"},
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
         ) as client:
             application_type_values = self.application_type_values
             if application_type_values:
@@ -84,10 +92,12 @@ class RegdocsSearcher:
                     else:
                         print(f"  records: {len(records)} ({elapsed:.1f}s)", flush=True)
                     for record in records:
-                        if record.document_url in yielded_urls:
-                            continue
-                        yielded_urls.add(record.document_url)
-                        yield record
+                        expanded_records = await self._expand_item_view_record(client, record)
+                        for expanded_record in expanded_records:
+                            if expanded_record.document_url in yielded_urls:
+                                continue
+                            yielded_urls.add(expanded_record.document_url)
+                            yield expanded_record
                     result_url = self._next_results_page(html, result_url)
                     page_number += 1
 
@@ -101,6 +111,67 @@ class RegdocsSearcher:
             return await asyncio.wait_for(fetch(), timeout=self.http_timeout_seconds)
 
         return await with_retries(bounded_fetch, attempts=2, base_delay_seconds=3.0)
+
+    async def _expand_item_view_record(
+        self,
+        client: httpx.AsyncClient,
+        record: DocumentRecord,
+    ) -> List[DocumentRecord]:
+        if "/regdocs/item/view" not in record.document_url.lower():
+            return [record]
+
+        try:
+            html = await self._fetch_text(client, record.document_url)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  could not expand item page {record.document_url}: {exc}", flush=True)
+            return [record]
+
+        linked_records = self._parse_document_links_from_item_page(html, record)
+        if not linked_records:
+            return [record]
+
+        return linked_records
+
+    def _parse_document_links_from_item_page(
+        self,
+        html: str,
+        parent_record: DocumentRecord,
+    ) -> List[DocumentRecord]:
+        soup = BeautifulSoup(html, "html.parser")
+        anchors = soup.select(
+            'a[href*=".pdf"], '
+            'a[href*="/REGDOCS/File/Download"], '
+            'a[href*="/REGDOCS/File/View"]'
+        )
+
+        records: List[DocumentRecord] = []
+        seen_urls = set()
+
+        for anchor in anchors:
+            href = anchor.get("href")
+            if not href:
+                continue
+
+            document_url = urljoin(parent_record.document_url, href)
+            if "/regdocs/item/view" in document_url.lower():
+                continue
+            if not self._looks_like_document_url(document_url):
+                continue
+            if document_url in seen_urls:
+                continue
+
+            seen_urls.add(document_url)
+            records.append(
+                DocumentRecord(
+                    application_type=parent_record.application_type,
+                    date_range=parent_record.date_range,
+                    result_url=parent_record.document_url,
+                    document_url=document_url,
+                    title=anchor.get_text(" ", strip=True) or parent_record.title,
+                )
+            )
+
+        return records
 
     def _parse_application_type_values(self, html: str) -> dict:
         soup = BeautifulSoup(html, "html.parser")
@@ -239,7 +310,7 @@ class RegdocsSearcher:
             href = anchor.get("href")
             if not href:
                 continue
-            document_url = href if href.startswith("http") else f"https://apps.cer-rec.gc.ca{href}"
+            document_url = urljoin(result_url, href)
             if not self._looks_like_document_url(document_url):
                 continue
             records.append(
