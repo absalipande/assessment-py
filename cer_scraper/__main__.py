@@ -65,11 +65,15 @@ async def run(args: argparse.Namespace) -> None:
     searcher = RegdocsSearcher(settings.base_url, settings.headless, settings.timeout_ms)
     downloader = DocumentDownloader(settings.output_dir, settings.timeout_ms / 1000)
     uploader = DriveUploader(settings.drive_folder_id)
+    discovered_count = 0
+    skipped_count = 0
 
     async for record in searcher.discover(jobs):
+        discovered_count += 1
         if record.document_url in seen:
             record.status = "skipped"
             manifest.append(record)
+            skipped_count += 1
             continue
 
         if not args.dry_run:
@@ -84,6 +88,11 @@ async def run(args: argparse.Namespace) -> None:
         manifest.append(record)
         seen.add(record.document_url)
         print(f"{record.status}: {record.document_url}")
+
+    if discovered_count == 0:
+        print("No document records discovered for this date range/application type selection.")
+    else:
+        print(f"Done. discovered={discovered_count} skipped={skipped_count}")
 
 
 class searcher_browser:

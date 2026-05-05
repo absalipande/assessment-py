@@ -7,8 +7,9 @@ REGDOCS. The scraper should run monthly, search the Advanced Search page for a d
 fixed list of CERA application types, download all matching documents, convert rare HTML-only
 records to PDF, and upload the output to Google Drive.
 
-The current blocker is the source website, not the scraper scaffold. From this environment, the
-provided Advanced Search URL times out before returning a response.
+The source website was initially timing out, but a later probe succeeded. The browser-rendered page
+remains slow and intermittent, so the scraper now uses REGDOCS' direct HTTP results endpoint for
+discovery instead of relying on Playwright UI rendering.
 
 URL:
 
@@ -38,6 +39,12 @@ The scaffold in this repository includes:
 
 ## Live-Site Test Result
 
+The endpoint probe was rerun after the initial timeout and returned successfully:
+
+```text
+ok status=200 elapsed=14.9s url=https://apps.cer-rec.gc.ca/REGDOCS/Search/Advanced
+```
+
 The dry run was attempted with:
 
 ```bash
@@ -48,7 +55,7 @@ PYTHONPATH=. .venv/bin/python -m cer_scraper run \
   --dry-run
 ```
 
-Result:
+Initial result:
 
 ```text
 Page.goto: net::ERR_CONNECTION_TIMED_OUT
@@ -61,24 +68,33 @@ A direct HTTP check also timed out:
 curl -I --max-time 30 https://apps.cer-rec.gc.ca/REGDOCS/Search/Advanced
 ```
 
-This indicates the endpoint is currently unreachable or too slow from the test environment. The
-failure happens before DOM inspection or selector interaction, so it is not currently a selector bug.
+After the site became reachable, the scraper reached the form but hit hidden/slow-rendered UI fields.
+REGDOCS exposes a direct AJAX results endpoint:
+
+```text
+/REGDOCS/Search/SearchAdvancedResults?sd=<from-date>&ed=<to-date>&rds=<application-type-id>
+```
+
+The scraper was updated to fetch the Advanced Search page once, map application-type labels to their
+REGDOCS filter IDs, then query this results endpoint directly. This avoids most Playwright page-load
+fragility. Playwright remains useful later for HTML-to-PDF conversion.
+
+The one-type dry run now completes successfully through the direct HTTP path. For the first
+application type in the requested date range, REGDOCS returned no document records:
+
+```text
+No document records discovered for this date range/application type selection.
+```
 
 ## Next Implementation Steps
 
-1. Re-run the endpoint probe when REGDOCS is reachable:
+1. Re-run the endpoint probe:
 
    ```bash
    PYTHONPATH=. .venv/bin/python -m cer_scraper probe --timeout 30
    ```
 
-2. If the page loads, inspect the live DOM and replace placeholder selectors in
-   `cer_scraper/search.py`.
-
-3. Check the browser Network tab for backend search requests. If REGDOCS exposes a stable search
-   endpoint, use direct HTTP calls instead of UI automation.
-
-4. Run a narrow proof of concept:
+2. Re-run the one-application-type dry run:
 
    ```bash
    PYTHONPATH=. .venv/bin/python -m cer_scraper run \
@@ -88,9 +104,11 @@ failure happens before DOM inspection or selector interaction, so it is not curr
      --dry-run
    ```
 
-5. Enable downloads after discovery succeeds.
+3. Expand the dry run beyond one application type once the one-type proof stays stable.
 
-6. Wire Google Drive upload last, after local download and manifest generation are reliable.
+4. Enable downloads after discovery succeeds.
+
+5. Wire Google Drive upload last, after local download and manifest generation are reliable.
 
 ## Risk Handling
 
@@ -106,5 +124,5 @@ The production scraper should assume REGDOCS will be slow or intermittently unav
 ## Recommendation
 
 Proceed with the assessment as a resilient scraping pipeline. Note explicitly that the provided
-REGDOCS Advanced Search link timed out during testing, and that final selector/API work depends on
-the source site becoming reachable.
+REGDOCS Advanced Search link is slow and intermittent, and that final selector/API work should be
+validated against the live site when it responds consistently.

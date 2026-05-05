@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from typing import AsyncIterator, List
+from urllib.parse import urlencode, urljoin
 
+import httpx
 from bs4 import BeautifulSoup
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError, async_playwright
 
@@ -16,6 +18,63 @@ class RegdocsSearcher:
         self.timeout_ms = timeout_ms
 
     async def discover(self, jobs: List[SearchJob]) -> AsyncIterator[DocumentRecord]:
+        async for record in self._discover_with_http(jobs):
+            yield record
+
+    async def _discover_with_http(self, jobs: List[SearchJob]) -> AsyncIterator[DocumentRecord]:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=httpx.Timeout(self.timeout_ms / 1000),
+            headers={"User-Agent": "cer-regdocs-monthly-review/0.1"},
+        ) as client:
+            advanced_html = await self._fetch_text(client, self.base_url)
+            application_type_values = self._parse_application_type_values(advanced_html)
+
+            for job in jobs:
+                filter_value = application_type_values.get(job.application_type)
+                if not filter_value:
+                    raise ValueError(f"Application type not found on REGDOCS page: {job.application_type}")
+
+                params = {"sd": job.from_date, "ed": job.to_date, "rds": filter_value}
+                result_url = urljoin(
+                    self.base_url,
+                    f"/REGDOCS/Search/SearchAdvancedResults?{urlencode(params)}",
+                )
+
+                while result_url:
+                    html = await self._fetch_text(client, result_url)
+                    for record in self._parse_result_page(html, result_url, job):
+                        yield record
+                    result_url = self._next_results_page(html, result_url)
+
+    async def _fetch_text(self, client: httpx.AsyncClient, url: str) -> str:
+        async def fetch() -> str:
+            response = await client.get(url)
+            response.raise_for_status()
+            return response.text
+
+        return await with_retries(fetch)
+
+    def _parse_application_type_values(self, html: str) -> dict:
+        soup = BeautifulSoup(html, "html.parser")
+        values = {}
+        for option in soup.select("#selectFilter1 option[value]"):
+            label = option.get_text(" ", strip=True)
+            value = option.get("value")
+            if label and value:
+                values[label] = value
+        return values
+
+    def _next_results_page(self, html: str, current_url: str) -> str:
+        soup = BeautifulSoup(html, "html.parser")
+        next_anchor = soup.find("a", string=lambda text: text and text.strip().lower() == "next")
+        if not next_anchor:
+            next_anchor = soup.select_one('a[rel="next"], a[href*="page="], a[href*="Page="]')
+        if not next_anchor or not next_anchor.get("href"):
+            return ""
+        return urljoin(current_url, next_anchor["href"])
+
+    async def discover_with_browser(self, jobs: List[SearchJob]) -> AsyncIterator[DocumentRecord]:
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(headless=self.headless)
             try:
@@ -58,20 +117,58 @@ class RegdocsSearcher:
 
     async def _open_advanced_search(self, page: Page) -> None:
         await with_retries(
-            lambda: page.goto(self.base_url, wait_until="domcontentloaded", timeout=self.timeout_ms)
+            lambda: page.goto(self.base_url, wait_until="commit", timeout=self.timeout_ms)
         )
+        await page.locator("#selectDateSelector").wait_for(state="attached", timeout=self.timeout_ms)
 
     async def _fill_date_range(self, page: Page, from_date: str, to_date: str) -> None:
-        await page.get_by_label("From").fill(from_date)
-        await page.get_by_label("To").fill(to_date)
+        await page.locator("#selectDateSelector").evaluate(
+            "(element) => { element.value = '-1'; element.dispatchEvent(new Event('change', { bubbles: true })); }"
+        )
+        await page.locator("#advanced-date-range").evaluate(
+            "element => element.classList.remove('hide')"
+        )
+        await page.locator("#StartDate").evaluate(
+            "(element, value) => { element.value = value; element.dispatchEvent(new Event('change', { bubbles: true })); }",
+            from_date,
+        )
+        await page.locator("#EndDate").evaluate(
+            "(element, value) => { element.value = value; element.dispatchEvent(new Event('change', { bubbles: true })); }",
+            to_date,
+        )
 
     async def _select_application_type(self, page: Page, application_type: str) -> None:
-        await page.get_by_label("Application Type").select_option(label=application_type)
-        await page.get_by_role("button", name="+").click()
+        await page.locator("#selectFilter1").wait_for(state="attached", timeout=self.timeout_ms)
+        selected_filter_value = await page.locator("#selectFilter1").evaluate(
+            """(select, label) => {
+                const option = Array.from(select.options).find((item) => item.text.trim() === label);
+                if (!option) {
+                    throw new Error(`Application type not found: ${label}`);
+                }
+                return option.value;
+            }""",
+            application_type,
+        )
+        await page.locator("form").evaluate(
+            """(form, value) => {
+                for (const existing of form.querySelectorAll('input[name="SelectedFilters"]')) {
+                    if (existing.value === value) {
+                        return;
+                    }
+                }
+
+                const input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = 'SelectedFilters';
+                input.value = value;
+                form.appendChild(input);
+            }""",
+            selected_filter_value,
+        )
 
     async def _submit_search(self, page: Page) -> None:
         async def submit() -> None:
-            await page.get_by_role("button", name="Search").click()
+            await page.locator("#btnSearch2").click()
             await page.wait_for_load_state("domcontentloaded", timeout=self.timeout_ms)
 
         await with_retries(submit)
@@ -83,7 +180,12 @@ class RegdocsSearcher:
         job: SearchJob,
     ) -> List[DocumentRecord]:
         soup = BeautifulSoup(html, "html.parser")
-        anchors = soup.select('a[href*=".pdf"], a[href*="/REGDOCS/"]')
+        anchors = soup.select(
+            'a[href*=".pdf"], '
+            'a[href*="/REGDOCS/Item/View"], '
+            'a[href*="/REGDOCS/File/Download"], '
+            'a[href*="/REGDOCS/File/View"]'
+        )
         records: List[DocumentRecord] = []
 
         for anchor in anchors:
@@ -91,6 +193,8 @@ class RegdocsSearcher:
             if not href:
                 continue
             document_url = href if href.startswith("http") else f"https://apps.cer-rec.gc.ca{href}"
+            if not self._looks_like_document_url(document_url):
+                continue
             records.append(
                 DocumentRecord(
                     application_type=job.application_type,
@@ -102,3 +206,15 @@ class RegdocsSearcher:
             )
 
         return records
+
+    def _looks_like_document_url(self, url: str) -> bool:
+        lowered = url.lower()
+        return any(
+            marker in lowered
+            for marker in (
+                ".pdf",
+                "/regdocs/item/view",
+                "/regdocs/file/download",
+                "/regdocs/file/view",
+            )
+        )
